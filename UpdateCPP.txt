@@ -1,0 +1,91 @@
+LIST OF STL SORTING ALGORITHMS
+	- Là các thuật tóan sắp xếp các container như vector list deque array
+	1. sort: là thuật toán sắp xếp cực kì phổ biến, nó sắp xếp các phần tử theo thứ tự tăng dần 
+		- Đối tượng sử dụng: vector, deque, array.
+		- Systax: std::sort(iterator_start, iterator_end);
+			+ iterator_start	: Iterator chỉ đến phần tử đầu tiên trong dãy.
+			+ iterator_end		: Iterator chỉ đến phần tử ngay sau phần tử cuối cùng trong dãy.
+		- Đặc điểm: 
+			+ Không ổn định: Nếu có hai phần tử có giá trị bằng nhau, thứ tự của chúng có thể bị thay đổi sau khi sắp xếp. Điều này có thể có tác động nếu bạn cần bảo toàn thứ tự của các phần tử có giá trị bằng nhau.
+			+ Độ phức tạp thuật toán: O(n log n).
+			+ Thuật toán dùng là Introselect là một sự kết hợp giữa Quicksort, Heapsort, và Insertion Sort (phần đa sử dụng là Quicksort, chỉ một số trường hợp xấu nhất mưới dùng tới Heapsort).
+				. Nếu quicksort không hiệu quả (ví dụ, trong trường hợp dãy có quá nhiều phần tử trùng lặp hoặc đã gần như được sắp xếp), thuật toán sẽ chuyển sang sử dụng heapsort hoặc insertion sort để đảm bảo độ phức tạp O(n log n).
+		- Ex: 
+			+ Sắp xếp mặc định (tăng dần):
+				std::vector<int> v = {3, 1, 4, 1, 5, 9};
+				std::sort(v.begin(), v.end());
+				// Kết quả: v = {1, 1, 3, 4, 5, 9}
+				
+			+ Sắp xếp theo thứ tự giảm dần:
+				std::sort(v.begin(), v.end(), std::greater<int>());
+				// Kết quả: v = {9, 5, 4, 3, 1, 1}
+				
+			+ Sắp xếp các đối tượng với hàm so sánh tùy chỉnh:
+				struct Person {
+					std::string name;
+					int age;
+				};
+
+				bool compareByAge(const Person &a, const Person &b) {
+					return a.age < b.age;
+				}
+
+				std::vector<Person> people = { {"Alice", 30}, {"Bob", 25}, {"Charlie", 35} };
+				std::sort(people.begin(), people.end(), compareByAge);
+				// Kết quả: people = { {"Bob", 25}, {"Alice", 30}, {"Charlie", 35} }
+				
+	2. stable_sort: cũng sắp xếp giống sort nhưng stable_sort sẽ mang tính ổn định cao hơn về mặt nếu có hai phần tử có giá trị bằng nhau thì thứ tự ban đầu của chúng trong container sẽ được bảo toàn sau khi sắp xếp.
+		- Systax1: std::stable_sort(iterator_start, iterator_end);
+			+ iterator_start: Iterator trỏ tới phần tử đầu tiên trong dãy cần sắp xếp.
+			+ iterator_end: Iterator trỏ tới phần tử tiếp theo sau phần tử cuối cùng trong dãy cần sắp xếp.
+			
+		- Systax2: std::stable_sort(iterator_start, iterator_end, comparator);
+			+ comparator: Hàm so sánh tùy chỉnh để sắp xếp các phần tử theo cách bạn mong muốn. Hàm so sánh này trả về true nếu phần tử đầu tiên cần xuất hiện trước phần tử thứ hai.
+			
+		- Đặc điểm:
+			+ stable_sort sử dụng thuật toán mergesort với độ phức tạp là O(n log n).
+		- Ex:
+			+ sắp xếp tăng dần với phần tử có hai chỉ số:
+				std::vector<std::pair<int, char>> v = {
+					{4, 'd'}, {1, 'a'}, {4, 'b'}, {3, 'c'}, {2, 'e'}
+				};
+				// Sắp xếp tăng dần theo giá trị thứ nhất
+				std::stable_sort(v.begin(), v.end());
+				--> OUtput: (1, a) (2, e) (3, c) (4, d) (4, b)
+			
+	3. lower_bound : dùng để tìm vị trí cảu phần tử đầu tiên lớn hơn hoặc bằng trong một dãy đã được sắp xếp.
+		- Systax: std::lower_bound(iterator_start, iterator_end, value);
+			+ iterator_start	: Iterator trỏ tới phần tử đầu tiên trong dãy cần tìm kiếm.
+			+ iterator_end		: Iterator trỏ tới phần tử tiếp theo sau phần tử cuối cùng trong dãy cần tìm kiếm.
+			+ value				: Giá trị cần tìm kiếm trong dãy.
+		- Trả về một iterator trỏ tới phần tử đầu tiên mà có giá trị không nhỏ hơn giá trị tìm kiếm, nếu không có sẽ trả về end().
+		- Thuật tóan sẽ tìm giá trị bằng trước, nếu không có mới tìm tới giá trị lớn hơn.
+		- Ex:
+			std::vector<int> v = {1, 2, 4, 4, 5, 6, 7, 9, 10};
+			// Tìm phần tử không nhỏ hơn 8
+			auto it = std::lower_bound(v.begin(), v.end(), 8);
+			--> Nếu có 8 sẽ trả về it tại 8 còn không sẽ là 9.
+			
+	4. upper_bound: dùng để tìm vị trí cảu phần tử đầu tiên lớn hơn trong một dãy đã được sắp xếp.
+		- Systax: std::upper_bound(iterator_start, iterator_end, value);
+			+ iterator_start	: Iterator trỏ tới phần tử đầu tiên trong dãy cần tìm kiếm.
+			+ iterator_end		: Iterator trỏ tới phần tử tiếp theo sau phần tử cuối cùng trong dãy cần tìm kiếm.
+			+ value				: Giá trị mà bạn muốn tìm kiếm.
+		- Trả về một iterator trỏ tới phần tử đầu tiên mà có giá trị lớn hơn giá trị tìm kiếm, nếu không có sẽ trả về end().
+		
+	5. equal_range: dùng để tìm dải con chứa tất cả các phần tử bằng giá trị tìm kiếm trong một dãy đã được sắp xếp.
+		- Tìm và trả về một cặp iterator đại diện cho dải con trong dãy đã sắp xếp mà chứa tất cả các phần tử có giá trị bằng với giá trị tìm kiếm.
+		- Systax: std::equal_range(iterator_start, iterator_end, value);
+			+ iterator_start	: Iterator trỏ tới phần tử đầu tiên trong dãy cần tìm kiếm.
+			+ iterator_end		: Iterator trỏ tới phần tử tiếp theo sau phần tử cuối cùng trong dãy cần tìm kiếm (tức là end()).
+			+ value				: Giá trị mà bạn muốn tìm trong dãy.
+		- Trả về: Một cặp iterator (pair), trong đó:
+			+ first	: Iterator trỏ tới phần tử đầu tiên có giá trị bằng value.
+			+ second: Iterator trỏ tới phần tử sau phần tử cuối cùng có giá trị bằng value (tức là iterator đến vị trí sau phần tử cuối cùng có giá trị bằng value).
+		- equal_range sử dụng tìm kiếm nhị phân để xác định dải con chứa tất cả các phần tử có giá trị bằng giá trị tìm kiếm trong dãy đã được sắp xếp. Độ phức tạp thời gian của nó là O(log n).
+		- Kết quả trả về là một cặp iterator, trong đó iterator đầu tiên trỏ tới phần tử đầu tiên có giá trị bằng value, còn iterator thứ hai trỏ tới phần tử sau phần tử cuối cùng có giá trị bằng value. Nếu không tìm thấy giá trị trong dãy, cặp iterator sẽ có cả hai iterator trỏ tới end().
+		- Ex:
+			std::vector<int> v = {1, 2, 4, 5, 5, 4, 7};
+			// Tìm dải con chứa tất cả các phần tử có giá trị bằng 4
+			auto range = std::equal_range(v.begin(), v.end(), 4);
+			--> Output: first = 4 - second = 5
