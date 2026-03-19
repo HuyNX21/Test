@@ -1,0 +1,71 @@
+Kiến trúc tổng quan
+client/ là phía client của framework Proxy-Stub đã thấy ở Common/. Nếu Common/ xây dựng cơ chế RPC, thì client/ là nơi sử dụng cơ chế đó để expose toàn bộ API của hệ thống máy in ra cho các ứng dụng gọi.
+
+Phân tích từng folder
+Observable — ~295 files
+
+Triển khai Observer pattern cho toàn hệ thống. Mỗi entity có thể quan sát được (Box, Fax, Job, AccessToken, Scanner...) đều có một class riêng trong ObservableClasses/ (~280 files). ObservableExecutor đóng vai trò dispatcher trung tâm, nhận notification từ server và route đến đúng observer đã đăng ký.
+
+Cần có vì: các app cần biết khi nào trạng thái thay đổi (job hoàn thành, hết giấy, user login...) mà không cần polling liên tục.
+
+Proxy — ~16,797 files (lớn nhất)
+
+Đây là trái tim của client/. Chia làm 2 phần chính:
+
+system/ (~3,679 files) — Proxy cho từng subsystem của máy in, mỗi subsystem một thư mục:
+
+adj/ — Calibration/adjustment
+authDev/ — Authentication device
+doc/ — Document/box management
+fax/ — Fax
+job/ — Job management
+nvd/ — Non-volatile data (settings lưu trữ)
+prt/ — Printer engine
+scn/ — Scanner
+uac/ — User account
+...và 20+ subsystem khác
+lib/ (~12,721 files) — Thư viện bên thứ ba: OpenSSL, zlib, libpng, libtiff, libjpeg, OCR lib, PDF lib, RSA/AES...
+
+Mỗi proxy class (ví dụ APIC_Adjust) wrap một server-side implementation, tự động marshal tham số, gửi qua socket, nhận kết quả về. App gọi như hàm bình thường.
+
+Cần có vì: tách biệt hoàn toàn logic nghiệp vụ khỏi cơ chế IPC. App không cần biết server đang chạy ở process nào.
+
+Proxy_Common — 12 files
+
+Tiện ích dùng chung cho tất cả proxy:
+
+WakeupControl — Cache kết quả các API call tốn kém (AppInfo, USB status, FAX warnings...) để tránh gọi lại nhiều lần
+ObserverAttachDetach — Template generic cho attach/detach observer
+CopyTable — Bảng marshal/unmarshal cho các struct phức tạp
+RequestBeforeWarp — Validate trước khi gọi (ví dụ: kiểm tra scanner tồn tại)
+Cần có vì: hàng trăm proxy class dùng chung các pattern này, tập trung ở đây tránh duplicate code.
+
+Stub — 7 files
+
+Stub cho các API đã deprecated, toàn bộ bọc trong #ifdef DEL_DISUSED_API. Gồm các class cũ: Stub_PLBC_PanelIFPacket, Stub_PMGC_PanelManager... với ClassIDMethodIDAnti.h map method name sang hex ID cũ.
+
+Cần có vì: giữ backward compatibility trong quá trình chuyển đổi, chờ xóa hoàn toàn.
+
+Luồng hoạt động
+
+[Application]
+     |
+     | gọi method bình thường
+     v
+[Proxy/system/xxx/APIC_Xxx.cpp]   <-- client/Proxy
+     |
+     | marshal tham số (CopyTable, Proxy_Common)
+     v
+[Common/DIV_Proxy + DIV_Marshaling]
+     |
+     | gửi qua socket
+     v
+[Server process - Stub side]
+     |
+     | kết quả trả về
+     v
+[Observable] <-- notify nếu có state change
+     |
+     v
+[Application callback]
+Toàn bộ client/ là lớp abstraction giúp app code như thể mọi thứ đều local, trong khi thực tế đang giao tiếp với nhiều server process khác nhau.
