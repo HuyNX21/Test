@@ -1,0 +1,56 @@
+Kiến trúc tổng quan
+Common/ xây dựng một framework RPC (Remote Procedure Call) theo mô hình Proxy-Stub — cho phép các process khác nhau trong máy in giao tiếp với nhau như thể gọi hàm local.
+
+Tầng nền tảng (Foundation)
+DIV_BaseLibrary
+Thư viện lõi, cung cấp mọi primitive cần thiết: Thread, MutexLock, Semaphore, Logger, DebugUtility, AllocateMemory, ThreadSafeMap. Tất cả các folder khác đều phụ thuộc vào đây. Không có nó thì không có gì chạy được.
+
+PortNumber
+Định nghĩa tập trung các port number dùng cho socket IPC. Tránh hardcode port rải rác khắp nơi.
+
+Tầng giao tiếp (Communication Layer)
+DIV_Common
+Cơ sở hạ tầng messaging chung: nhận message, quản lý request, observer pattern, mediator đồng bộ. Là "xương sống" của luồng message giữa các component.
+
+DIV_connect
+Quản lý kết nối socket thực tế giữa proxy và stub: ConnectManager, callback execution, xóa instance khi disconnect. Đây là lớp transport.
+
+DIV_connect_LocalUI
+Biến thể của DIV_connect dành riêng cho Local UI (màn hình cảm ứng trên máy in), có thể dùng cơ chế kết nối khác (shared memory hoặc local socket).
+
+Tầng Proxy-Stub (RPC Core)
+DIV_Marshaling
+Serialize/deserialize dữ liệu để truyền qua socket. File marsahling.cpp và unmarsahling.cpp rất lớn (3-4MB) vì chứa code generated cho hàng trăm kiểu dữ liệu. Không có tầng này thì không thể truyền struct/object qua IPC.
+
+DIV_Proxy
+Phía client: khi app gọi một method, Proxy đóng gói tham số, gửi qua socket, chờ kết quả trả về. App không biết mình đang gọi remote.
+
+DIV_Stub
+Phía server: nhận message từ socket, giải mã, dispatch đến implementation thực sự, trả kết quả về. Quản lý vòng đời instance.
+
+Tầng dịch vụ hỗ trợ (Supporting Services)
+DIV_Lapi
+Wrapper cho LAPI (Low-level API) — đọc trạng thái thiết bị, cảnh báo, notification từ hardware của máy in.
+
+blkapi
+Block API — giao tiếp với engine in (block-level operations), xử lý job in ở tầng thấp.
+
+ITYPE
+Font rendering engine — render chữ lên panel/màn hình, hỗ trợ nhiều font và encoding.
+
+panel
+Quản lý tài nguyên UI cho panel vật lý (màn hình LCD/cảm ứng): text, symbol, layout cho từng model máy (Zeus, Venus, Deneb, Helios, Sparrow...).
+
+webuijsonparser
+Parse file JSON cấu hình Web UI (UserEditData.json, AdminEditData.json) — widget layout, program key, cài đặt Copy/Scan/Fax.
+
+Tại sao cần tách như vậy?
+Máy in có nhiều process độc lập (UI, print engine, scan, fax, network...). Chúng cần giao tiếp nhau nhưng không thể share memory trực tiếp. Framework Proxy-Stub này giải quyết bài toán đó:
+
+
+[App A]                          [App B]
+  |                                 |
+[Proxy] --socket/IPC--> [Stub] --> [Real Implementation]
+  |                                 |
+[Marshaling]           [Unmarshaling]
+Mỗi folder có trách nhiệm rõ ràng, tái sử dụng được trên nhiều module khác nhau trong cùng hệ thống.
