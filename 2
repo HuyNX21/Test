@@ -1,0 +1,642 @@
+Phân tích messageloop() với TYPE_EnablerRequestKind_LicenseCode
+1. Tiền xử lý (trước switch) — dòng 569–598
+Vì e_MessageType == TYPE_EnablerRequestKind_LicenseCode không phải LicenceFunctionEnable hay LicenceFunctionCodeImport, khối if ở dòng 569 được thực thi:
+
+Reset callback address (setActionInspect_callbackAddress(NULL))
+Reset ChgPrtSpeed_Req → TYPE_EnablerRequestKind_None
+Reset ChgPrtSpdType → TYPE_FEKTypeNon
+Reset EnablerEndFlg_msgloop → NonEnd
+Reset EnablerEndFlg_LCA → NonEnd
+Lưu callback mới: setActionInspect_callbackAddress(fp_Callback)
+Lưu request kind: setChgPrtSpeed_Req(TYPE_EnablerRequestKind_LicenseCode)
+Reset AutoLicenseSettingStatus cho Enable/Disable/Restoration nếu đang ở trạng thái Finish
+2. case TYPE_EnablerRequestKind_LicenseCode — dòng 618–667
+Bước 1: Gọi actionInspectLicenseCode(uc_FnCode, pc_InCode, fp_Callback) → trả về e_Result
+
+Bước 2: Lấy e_Type = getChgPrtSpdType() (FEK02/03/04 = thay đổi tốc độ in)
+
+Bước 3: Nếu e_Type là FEK02/03/04 (speed change):
+
+Nếu EnablerEndFlg_msgloop != End → set flag = End rồi break (callback sẽ được gọi sau bởi changePrintSpeed())
+Nếu flag đã là End → tiếp tục xuống
+Bước 4: Nếu fp_Callback != NULL → gọi callback (*p)(e_Result) — dòng 636
+
+Bước 5: Nếu không phải LCA auto-license (AutoLicenseSettingStatus != Exec) và e_Result == OK:
+
+Nếu FEK02/03/04: set USB check flag, không reboot
+Nếu FEK khác:
+Kiểm tra getEnableBrowserExAutoReboot_Reset(uc_FnCode):
+False → break (không reboot)
+True → kiểm tra SetupWizardOpenFlag:
+False → gọi reboot() — dòng 662
+True → không reboot
+3. actionInspectLicenseCode() — dòng 3103–3458
+Luồng xác thực License Code:
+
+
+Input: pc_FunctionCode, pc_LicenseCodeBlock[6][5]
+Bước	Mô tả
+Null check	Trả ParamError nếu thiếu tham số
+LK102 bypass	Nếu FunctionCode là Q/CA/EA/CQ/EQ/GA/GQ → trả OK ngay (bỏ qua xác thực)
+Ghép LicenseCode	6 block × 5 byte = 30 byte uc_LicenseCode
+parseLicenseCode()	Tách ra: uc_MD5_LicenseCode (16 byte hash) + uc_SaltCode (salt value)
+Lấy Serial No	rapGetSerialNoPrinter() → uc_SerialNumberPRT
+Build FEK string	Duyệt uc_FunctionStatus bit-by-bit → ghép chuỗi FEK01_ADD,...,FEK64_ADD
+Challenge Code	getChallengeCode() (hoặc TempChallengeCode nếu chưa có) → AES-CBC decrypt → uc_MFP_ChallengeCode
+Salt random	Lấy 2 byte đầu của uc_SaltCode
+Salt table	uc_TableNo = (uc_SaltCode[2] & 0xF0) >> 4 → GetSaltData(uc_TableNo) → 4 byte (swap endian nếu Little Endian)
+MD5 hash	KM_MD5(uc_CompLicenseCode, length) → uc_CompMD5_LicenseCode
+So sánh hash	memcmp(uc_MD5_LicenseCode, uc_CompMD5_LicenseCode, 15 byte)
+Nếu khớp	Set FEK_CategoryState = RESTART cho từng FEK bit trong uc_CauseFunctionCode; xóa InvalidCode trong NVRAM
+Nếu không khớp	Trả TYPE_EnablerResult_InspectFailed
+Tóm tắt luồng tổng thể
+
+messageloop()
+  └─ [tiền xử lý] reset flags, lưu callback
+  └─ actionInspectLicenseCode()
+       ├─ LK102 bypass check
+       ├─ parse LicenseCode → MD5 + Salt
+       ├─ build composite string: SerialNo + FEK list + ChallengeCode + Salt
+       ├─ MD5(composite) → so sánh với MD5 trong LicenseCode
+       ├─ OK  → set FEK CategoryState=RESTART, clear InvalidCode
+       └─ NG  → InspectFailed
+  └─ callback(e_Result)
+  └─ nếu OK + non-LCA + non-FEK02/03/04 → reboot() (nếu điều kiện cho phép)
+
+=================================================================================================================================================================================================================================================
+=================================================================================================================================================================================================================================================
+
+Phân tích actionInspectLicenseCode()
+Mục đích
+Xác thực License Code do người dùng nhập vào bằng cách tái tạo lại hash MD5 từ dữ liệu máy, rồi so sánh với hash nhúng trong License Code.
+
+Quy trình chi tiết
+Bước 1 — Kiểm tra tham số (dòng 3108)
+
+pc_LicenseCodeBlock == NULL || fp_Callback == NULL → ParamError
+Bước 2 — LK102 Bypass (dòng 3114–3130)
+Nếu pc_FunctionCode là một trong: Q, CA, EA, CQ, EQ, GA, GQ
+→ trả TYPE_EnablerResult_OK ngay, bỏ qua toàn bộ xác thực
+(Đây là các FEK tổ hợp của FEK5/7/8)
+
+Bước 3 — Ghép License Code 30 byte (dòng 3132–3138)
+
+6 block × 5 byte → uc_LicenseCode[30]
+Bước 4 — parseLicenseCode() (dòng 3148)
+Tách uc_LicenseCode[30] thành:
+
+uc_MD5_LicenseCode[16] — hash MD5 nhúng trong code
+uc_SaltCode[3] — salt value (random 2 byte + table index 4 bit)
+Bước 5 — Xây dựng chuỗi composite để hash (dòng 3168–3389)
+Chuỗi uc_CompLicenseCode được ghép theo thứ tự:
+
+Thành phần	Nguồn	Mô tả
+Serial No	rapGetSerialNoPrinter()	Serial máy in
+FEK list	getFunctionEnablerStatus() + bit scan	Danh sách FEK đang enable, dạng "FEK01,FEK03,..."
+Challenge Code	getChallengeCode() → AES-CBC decrypt	3 byte sau decrypt (TYPD_MAX_MFP_ChallengeCode - 1)
+Salt random	uc_SaltCode[0..1]	2 byte random
+Salt table	GetSaltData(uc_TableNo)	4 byte từ bảng, swap endian nếu Little Endian
+FunctionCode xử lý:
+
+Căn phải vào buffer 13 byte (fill 'A')
+Base32ToBinary() → 9 byte binary (uc_CauseFunctionCode)
+Shift 1 bit (bỏ bit đầu thừa) → 8 byte = 64 bit = 64 FEK
+FunctionStatus so sánh:
+
+
+// Chế độ thường:
+uc_FunctionStatus[i] = ~currentStatus[i] & causeFunctionCode[i]
+// → chỉ lấy các FEK chưa enable mà License Code yêu cầu enable
+
+// Chế độ Restore (b_InspectRestorCodeFlag == True):
+uc_FunctionStatus[i] = causeFunctionCode[i]
+// → lấy toàn bộ FEK trong License Code
+Bước 6 — Tính MD5 và so sánh (dòng 3409–3442)
+
+KM_MD5(uc_CompLicenseCode, length) → uc_CompMD5_LicenseCode
+memcmp(uc_MD5_LicenseCode, uc_CompMD5_LicenseCode, 15 byte)
+Khớp → tiếp tục
+Không khớp → TYPE_EnablerResult_InspectFailed
+Bước 7 — Kích hoạt FEK (dòng 3419–3437, chỉ khi hash khớp)
+Duyệt bit uc_CauseFunctionCode:
+
+
+pc_EnablerSetting->setFEK_CotegoryState(FEKType, TYPE_CategoryState_RESTART)
+→ Đánh dấu từng FEK cần kích hoạt với trạng thái RESTART
+
+Bước 8 — Xóa Invalid Code trong NVRAM (dòng 3448–3453)
+
+pc_EnablerSetting->setInvalidCode(empty)   // xóa NVRAM
+memset(m_ucDisablerFinishLicenseCode, 0)   // xóa bộ nhớ
+Sơ đồ luồng tổng thể
+
+actionInspectLicenseCode()
+│
+├─ NULL check → ParamError
+├─ LK102 FunctionCode? → OK (bypass)
+├─ Ghép 6×5 byte → LicenseCode[30]
+├─ parseLicenseCode() → MD5[16] + Salt[3]
+│
+├─ Build composite string:
+│    SerialNo + FEK_list + ChallengeCode(AES decrypt) + Salt_random + Salt_table
+│
+├─ KM_MD5(composite) → CompMD5
+├─ memcmp(MD5_from_code, CompMD5, 15)
+│    ├─ MATCH → setFEK_CategoryState(RESTART) + clear NVRAM InvalidCode → OK
+│    └─ MISMATCH → InspectFailed
+Điểm quan trọng
+Bảo mật: License Code được xác thực bằng MD5 của SerialNo + FEK + ChallengeCode + Salt — ràng buộc với từng máy cụ thể qua Serial No và Challenge Code
+Challenge Code: Được mã hóa AES-CBC, phải decrypt trước khi dùng → ngăn giả mạo
+Salt: Gồm 2 phần — random (chống replay) và table index (thêm entropy từ bảng cố định)
+LK102 bypass: Các FEK tổ hợp (Q/CA/EA...) được bỏ qua xác thực hoàn toàn
+
+=================================================================================================================================================================================================================================================
+=================================================================================================================================================================================================================================================
+
+Điều kiện 1 — Hash MD5 khớp (dòng 3417)
+
+memcmp(uc_MD5_LicenseCode, uc_CompMD5_LicenseCode, TYPD_MAX_MD5Code-1) == 0
+License Code nhập vào hợp lệ — hash MD5 tái tạo từ máy trùng với hash nhúng trong code.
+
+Điều kiện 2 — Byte FEK tại vị trí ul_Index khác 0 (dòng 3423)
+
+uc_CauseFunctionCode[(TYPD_PUCFUNCTION_MAX-1) - ul_Index] != 0
+Byte này còn chứa bit FEK cần xử lý (nếu = 0 thì break vòng lặp trong).
+
+Điều kiện 3 — Bit LSB của byte đó = 1 (dòng 3427)
+
+(uc_CauseFunctionCode[...] & TYPD_MSK_CheckBit) == 0x01
+Bit hiện tại (sau khi shift dần) đang là 1 — tức FEK tương ứng tại vị trí (ul_Index * TYPD_PUCFUNCTION_MAX) + ul_nBit được yêu cầu kích hoạt.
+
+Kết quả khi gọi
+
+pc_EnablerSetting->setFEK_CotegoryState(
+    s_FEKTypeKind[(ul_Index * TYPD_PUCFUNCTION_MAX) + ul_nBit].e_FEKType,
+    TYPE_CategoryState_RESTART
+);
+→ Đánh dấu FEK tương ứng với trạng thái RESTART — máy sẽ cần restart để kích hoạt tính năng đó.
+
+Tóm tắt điều kiện gọi
+
+License Code hợp lệ (MD5 match)
+  └─ Duyệt từng byte của uc_CauseFunctionCode (8 byte = 64 FEK)
+       └─ Byte != 0 (còn FEK cần xử lý)
+            └─ Bit LSB == 1 (FEK này được yêu cầu enable)
+                 └─ → setFEK_CotegoryState(FEKType, RESTART)
+Mỗi lần gọi tương ứng với một FEK cụ thể trong License Code. Vòng lặp duyệt hết 64 FEK (8 byte × 8 bit), gọi setFEK_CotegoryState cho mỗi FEK có bit = 1.
+
+=================================================================================================================================================================================================================================================
+=================================================================================================================================================================================================================================================
+
+Trace actionInspectLicenseCode với pc_FunctionCode = "AAAAAAADZT4PE"
+Bước 1 — Null check & LK102 bypass
+"AAAAAAADZT4PE" không thuộc {Q, CA, EA, CQ, EQ, GA, GQ} → không bypass, tiếp tục xử lý.
+
+Bước 2 — Chuẩn bị uc_FunctionCode[14]
+
+TYPD_MAX_FunctionCode = 14  (13 ký tự + NULL)
+ul_Length = strlen("AAAAAAADZT4PE") = 13
+
+memset(uc_FunctionCode, 'A', 14)  → "AAAAAAAAAAAAA\0"
+memcpy(&uc_FunctionCode[(14-1) - 13], pc_FunctionCode, 13)
+       = &uc_FunctionCode[0]
+→ uc_FunctionCode = "AAAAAAADZT4PE" (13 byte, vị trí 0–12, byte 13 = \0)
+
+Bước 3 — Base32ToBinary("AAAAAAADZT4PE", 13, uc_CauseFunctionCode, 9)
+Bảng Base32 custom:
+
+Char	Value (5 bit)
+A	00000
+D	00011
+Z	11001
+T	10011
+4	11100
+P	01111
+E	00100
+Chuỗi 13 ký tự → 13 × 5 = 65 bit → 9 byte (8 byte đủ + 1 bit thừa):
+
+
+A A A A A A A D  Z  T  4  P  E
+00000 00000 00000 00000 00000 00000 00000 00011 11001 10011 11100 01111 00100
+Ghép 65 bit liên tiếp:
+
+
+00000 00000 00000 00000 00000 00000 00000 00011 11001 10011 11100 01111 00100
+Chia thành 9 byte (8 bit mỗi byte):
+
+
+Byte[0]: 00000000  = 0x00
+Byte[1]: 00000000  = 0x00
+Byte[2]: 00000000  = 0x00
+Byte[3]: 00000000  = 0x00
+Byte[4]: 00000001  = 0x01
+Byte[5]: 11001100  = 0xCC
+Byte[6]: 11111000  = 0xF8  (thực ra: 11100 01111 → xem lại)
+Tính chính xác từng case trong switch(ul_LoopIndex % 8):
+
+idx	char	val(5bit)	case	binary output
+0	A	00000	0	[0] = 00000_000
+1	A	00000	1	[0]|=000 → [1]=00_000000
+2	A	00000	2	[1]|=00000_0
+3	A	00000	3	[1]|=0000 → [2]=0000_0000
+4	A	00000	4	[2]|=00000 → [3]=0_0000000
+5	A	00000	5	[3]|=000000
+6	A	00000	6	[3]|=000 → [4]=000_00000
+7	D	00011	7	[4]|=00011
+8	Z	11001	0	[5] = 11001_000
+9	T	10011	1	[5]|=100 → [6]=11_000000
+10	4	11100	2	[6]|=11100_0
+11	P	01111	3	[6]|=0111 → [7]=1111_0000
+12	E	00100	4	[7]|=00100 → [8]=0_0000000
+Kết quả uc_CauseFunctionCode[9]:
+
+
+[0]=0x00  [1]=0x00  [2]=0x00  [3]=0x00  [4]=0x03
+[5]=0xC8  [6]=0xF8  [7]=0xF0  [8]=0x00  (byte thứ 9 = padding)
+Chính xác hơn:
+
+
+[4] = 000_00000 | 00011 = 0x03
+[5] = 11001_000 | 100   = 0xCC  (11001000 | 00000100 = 0xCC)
+[6] = 11_000000 | 11100_0 = 0xF8  (11000000 | 00111000 = 0xF8... )
+Bước 4 — Shift 1 bit (dòng 3212–3220)
+
+// Bỏ bit đầu thừa, shift toàn bộ 8 byte trái 1 bit
+for i in 0..7:
+    CauseFunctionCode[i] = (CauseFunctionCode[i] << 1) & 0xFE
+    if (CauseFunctionCode[i+1] & 0x80): CauseFunctionCode[i] |= 0x01
+Trước shift: 00 00 00 00 03 CC F8 F0 00
+
+Sau shift (mỗi byte << 1, lấy MSB của byte kế):
+
+
+[0] = (0x00<<1)&FE | (0x00>>7) = 0x00
+[1] = (0x00<<1)&FE | (0x00>>7) = 0x00
+[2] = (0x00<<1)&FE | (0x00>>7) = 0x00
+[3] = (0x00<<1)&FE | (0x03>>7) = 0x00
+[4] = (0x03<<1)&FE | (0xCC>>7) = 0x06 | 0x01 = 0x07
+[5] = (0xCC<<1)&FE | (0xF8>>7) = 0x98 | 0x01 = 0x99
+[6] = (0xF8<<1)&FE | (0xF0>>7) = 0xF0 | 0x01 = 0xF1
+[7] = (0xF0<<1)&FE | (0x00>>7) = 0xE0
+→ uc_CauseFunctionCode[0..7] = {0x00, 0x00, 0x00, 0x00, 0x07, 0x99, 0xF1, 0xE0}
+
+Bước 5 — So sánh với uc_FunctionStatus (dòng 3225–3236)
+
+// Chế độ thường (b_InspectRestorCodeFlag == False):
+uc_FunctionStatus[i] = ~currentStatus[i] & uc_CauseFunctionCode[(7-i)]
+Tức là: chỉ lấy các FEK chưa enable mà License Code yêu cầu.
+
+Mapping uc_CauseFunctionCode ngược chiều:
+
+
+FunctionStatus[0] ← CauseFunctionCode[7] = 0xE0  → FEK 57,58,59 (bit 5,6,7)
+FunctionStatus[1] ← CauseFunctionCode[6] = 0xF1  → FEK 49..53,57 (bit 0,4,5,6,7)
+FunctionStatus[2] ← CauseFunctionCode[5] = 0x99  → FEK 41,44,48 (bit 0,3,4,7)
+FunctionStatus[3] ← CauseFunctionCode[4] = 0x07  → FEK 33,34,35 (bit 0,1,2)
+FunctionStatus[4] ← CauseFunctionCode[3] = 0x00  → không có FEK
+FunctionStatus[5] ← CauseFunctionCode[2] = 0x00  → không có FEK
+FunctionStatus[6] ← CauseFunctionCode[1] = 0x00  → không có FEK
+FunctionStatus[7] ← CauseFunctionCode[0] = 0x00  → không có FEK
+Bước 6 — Build FEK string cho composite hash
+Từ uc_FunctionStatus trên, các FEK được ghép vào chuỗi composite (chỉ những FEK chưa enable):
+
+
+FEK33, FEK34, FEK35, FEK41, FEK44, FEK48(?), FEK49..FEK53, FEK57, FEK58, FEK59
+(Tên FEK cụ thể phụ thuộc vào bảng s_FEKTypeKind và c_FEK_ADD)
+
+Tóm tắt luồng với "AAAAAAADZT4PE"
+
+"AAAAAAADZT4PE"
+  → Base32ToBinary → 9 byte binary
+  → Shift 1 bit → 8 byte: {00,00,00,00,07,99,F1,E0}
+  → Các FEK được yêu cầu: FEK33~35, FEK41, FEK44, FEK49~53, FEK57~59
+  → Build composite: SerialNo + FEK_list + ChallengeCode + Salt
+  → MD5(composite) so sánh với hash trong LicenseCode
+  → Nếu khớp: setFEK_CategoryState(RESTART) cho từng FEK trên
+  
+=================================================================================================================================================================================================================================================
+=================================================================================================================================================================================================================================================
+
+Flow từ req_changePrintSpeed(TYPE_FEKType03, CallBackChangePrintSpeed)
+
+[Caller]
+  │
+  │  e_FEKType = TYPE_FEKType03 (=2)
+  │  fp = CallBackChangePrintSpeed
+  ▼
+ENGC_Printer::req_changePrintSpeed()          [ENGC_Printer.cpp:878]
+  │
+  ├─ CallBackChangePrintSpeed == NULL? → return False
+  │
+  └─ pc_PrinterImp->req_changePrintSpeed(TYPE_FEKType03, fp)
+       │
+       ▼
+  ENGC_PrinterImpColor::req_changePrintSpeed()  [ENGC_PrinterImpColor.cpp:1327]
+       │
+       └─ pc_PrinterImpColorEngine_->req_changePrintSpeed(TYPE_FEKType03, fp)
+            │
+            ▼
+       ENGC_PrinterImpColorEngine::req_changePrintSpeed()  [ENGC_PrinterImpColorEngine.cpp:742]
+            │
+            ├─ [LOG] "req_changePrintSpeedStart"
+            │
+            ├─ ans_CallBackChangePrintSpeed == NULL?
+            │    ├─ YES → lưu: ans_CallBackChangePrintSpeed = fp
+            │    │
+            │    │  switch(TYPE_FEKType03):
+            │    │    case TYPE_FEKType03 → ss_PrintSpeedType = CC_PrintSpeedChangeRequest2
+            │    │                          uc_changeMachineType = THRE_MACHINENO_2
+            │    │
+            │    │  comENG.setPrintSpeedChangeRequest(CC_PrintSpeedChangeRequest2)
+            │    │       │
+            │    │       ▼
+            │    │  CC_ENG::setPrintSpeedChangeRequest()    [ccengine.cpp:7779]
+            │    │       ├─ TX.setBlPasswordOfChangeSpeedReq(True)   ← đánh dấu cần gửi password
+            │    │       └─ ct_Command << CC_PrintSpeedChangeRequest2 ← đưa cmd vào queue
+            │    │
+            │    └─ b_result = True
+            │
+            ├─ [LOG] "req_changePrintSpeedEnd"
+            └─ return True
+
+[Async - Communication cycle với Engine]
+  │
+  ▼
+ENGC_EngIfImpColor::sendData()  (gọi định kỳ)
+  │
+  ├─ TX.getBlPasswordOfChangeSpeedReq() == True?
+  │    └─ YES → gửi A_PasswordOfChangeSpeed = "63c4b5b5" lên Engine  [ENGC_EngIfImpColor.cpp:3374]
+  │              TX.setBlPasswordOfChangeSpeedReq(False)
+  │
+  └─ ct_Command có CC_PrintSpeedChangeRequest2?
+       └─ gửi command CC_PrintSpeedChangeRequest2 xuống Engine (hardware)
+
+[Engine xử lý xong → gửi report RC_PrintSpeedChangeReportOK]
+  │
+  ▼
+ENGC_EngIfImpColor::receiveData()  (nhận report từ Engine)
+  │
+  └─ case toReportCode(RC_PrintSpeedChangeReportOK):   [ENGC_EngIfImpColor.cpp:4343]
+       └─ pc_PrinterImpColorEngine->ans_changePrintSpeed(data_para)
+            │
+            ▼
+       ENGC_PrinterImpColorEngine::ans_changePrintSpeed()  [ENGC_PrinterImpColorEngine.cpp:353]
+            │
+            ├─ [LOG] "ans_changePrintSpeedStart"
+            │
+            ├─ ans_CallBackChangePrintSpeed != NULL?
+            │    └─ YES
+            │         ├─ us_Result == 0 (success)?
+            │         │    ├─ setInitStab(TYPE_InitStabNonExec)   ← đánh dấu cần image stabilization
+            │         │    ├─ THRF_setMachineSpeedType(THRE_MACHINENO_2) ← ghi EEPROM qua BSP
+            │         │    └─ uc_changeMachineType = THRE_MACHINENO_0   ← reset
+            │         │
+            │         ├─ us_Result = (us_Result==0) ? True : False   ← convert 0→True, else→False
+            │         │
+            │         ├─ (*ans_CallBackChangePrintSpeed)(us_Result)  ← GỌI CALLBACK
+            │         │         │
+            │         │         ▼
+            │         │    CallBackChangePrintSpeed(True/False)   ← trả kết quả về caller
+            │         │
+            │         └─ ans_CallBackChangePrintSpeed = NULL   ← reset
+            │
+            └─ [LOG] "ans_changePrintSpeedEnd"
+Tóm tắt các layer
+Layer	Class	Vai trò
+API	ENGC_Printer	Entry point, kiểm tra NULL
+Impl	ENGC_PrinterImpColor	Delegate xuống engine
+Engine	ENGC_PrinterImpColorEngine	Lưu callback, set command
+Command	CC_ENG	Đưa cmd vào queue + set password flag
+Comm	ENGC_EngIfImpColor	Gửi password + command xuống hardware
+Hardware	Engine (physical)	Thực hiện thay đổi tốc độ
+Report	ENGC_EngIfImpColor	Nhận RC_PrintSpeedChangeReportOK
+Callback	ENGC_PrinterImpColorEngine	Ghi EEPROM + gọi CallBackChangePrintSpeed
+
+=================================================================================================================================================================================================================================================
+=================================================================================================================================================================================================================================================
+
+Đúng. Nhìn vào logic:
+
+
+if( us_Result == 0 )  // Engine báo SUCCESS
+{
+    setInitStab( TYPE_InitStabNonExec );
+    THRF_setMachineSpeedType( uc_changeMachineType );  // ghi EEPROM
+    uc_changeMachineType = THRE_MACHINENO_0;
+}
+us_Result = static_cast<ushort>(( us_Result == 0 ) ? True : False);
+(*ans_CallBackChangePrintSpeed)( us_Result );
+Convention ở tầng Engine (hardware protocol):
+
+us_Result == 0 → thành công
+us_Result != 0 → thất bại
+Sau khi convert, giá trị truyền vào callback:
+
+True (=1) → thành công
+False (=0) → thất bại
+Tức là convention bị đảo ngược giữa 2 tầng:
+
+Tầng	Giá trị	Ý nghĩa
+Engine protocol (us_Result nhận vào)	0	SUCCESS
+Engine protocol (us_Result nhận vào)	!= 0	FAIL
+Callback (CallBackChangePrintSpeed)	True (1)	SUCCESS
+Callback (CallBackChangePrintSpeed)	False (0)	FAIL
+Dòng static_cast đó chính là bước normalize từ engine convention sang application convention trước khi gọi callback.
+
+Đây là chủ ý có chủ đích, không phải ngẫu nhiên. Có 2 lý do:
+
+1. Engine hardware protocol dùng convention "0 = OK"
+
+Đây là convention phổ biến trong embedded/hardware protocol — giống như Unix return code. Engine trả về 0 nghĩa là "no error". Các giá trị khác là error code cụ thể.
+
+2. Application layer dùng convention Bool (True/False)
+
+Toàn bộ codebase dùng Bool kiểu True/False cho kết quả hàm — nhìn vào signature callback:
+
+
+void (*CallBackChangePrintSpeed)( ushort us_Result )
+Và cách dùng ở caller — kết quả True = thành công là tự nhiên hơn cho application code.
+
+Bằng chứng trong code:
+
+Dòng convert chỉ chạy sau khi đã xử lý side effects (ghi EEPROM, set flag) dựa trên us_Result == 0. Tức là người viết code hiểu rõ:
+
+
+// Dùng us_Result gốc (0=OK) để xử lý logic
+if( us_Result == 0 ) {
+    THRF_setMachineSpeedType(...);  // chỉ ghi EEPROM khi thành công
+}
+
+// Rồi mới convert sang Bool convention cho callback
+us_Result = (us_Result == 0) ? True : False;
+(*ans_CallBackChangePrintSpeed)( us_Result );
+Nếu convert trước thì logic if( us_Result == 0 ) sẽ sai. Thứ tự này là có chủ ý.
+
+Tóm lại: đây là boundary translation — tầng glue code chuyển đổi convention giữa hardware protocol và application layer, hoàn toàn có chủ đích.
+
+=================================================================================================================================================================================================================================================
+=================================================================================================================================================================================================================================================
+
+Flow sau khi setPrintSpeedChangeRequest(CC_PrintSpeedChangeRequest2)
+
+CC_ENG::setPrintSpeedChangeRequest(CC_PrintSpeedChangeRequest2)  [ccengine.cpp:7779]
+  ├─ TX.setBlPasswordOfChangeSpeedReq(True)   ← đánh dấu cần gửi password
+  └─ ct_Command << CC_PrintSpeedChangeRequest2 ← đẩy vào command queue
+
+[Communication cycle - gọi định kỳ bởi task]
+  │
+  ▼
+ENGC_EngIfImpColor::procENGSend()   ← send cycle
+  │
+  ├─ [1] Gửi A_ChangePrintSpeedInfo (map address 0x6d)
+  │       p_sendChangePrintSpeedInfo()
+  │         ├─ sendChangePrintSpeedInfo_CommonA3()
+  │         │    └─ _transMap(False, A_ChangePrintSpeedInfo, getUsChangePrintSpeedCurrent())
+  │         └─ sendChangePrintSpeedInfo_CommonA3A4()
+  │              └─ (dynamic speed change - khác flow này)
+  │
+  ├─ [2] Gửi A_PasswordOfChangeSpeed (map address 0x7d)  [dòng 3374]
+  │       TX.getBlPasswordOfChangeSpeedReq() == True?
+  │         └─ YES → set password = "63c4b5b5"
+  │                  _transMap(True, A_PasswordOfChangeSpeed, data)  ← gửi password lên Engine
+  │                  TX.setBlPasswordOfChangeSpeedReq(False)         ← reset flag
+  │
+  └─ [3] Gửi Command từ ct_Command queue  [dòng 4084]
+          ct_Command.isExist() == True?
+            └─ YES
+                ├─ command == 0xFFFFFFFF (chưa có cmd đang gửi)?
+                │    └─ YES → ct_Command.peek(command, 0)  ← lấy CC_PrintSpeedChangeRequest2
+                │    └─ NO  → return (chờ ACK của cmd trước)
+                │
+                ├─ ifENG.transCommand(EC_SSCCode_PRT,
+                │                     toCommandtCode(CC_PrintSpeedChangeRequest2),
+                │                     uc_CommandPara)
+                │    ├─ OK  → command gửi thành công xuống hardware
+                │    └─ NG  → command = 0xFFFFFFFF, return (retry sau)
+                │
+                └─ isAckNakSystem()?
+                     ├─ NO  → ct_Command >> command (pop ngay)
+                     └─ YES → giữ command, chờ ACK/NAK từ Engine
+
+[Engine nhận command, xử lý xong → gửi report]
+  │
+  ▼
+ENGC_EngIfImpColor::procENGReceive()
+  │
+  └─ receiveAanalize() nhận RC_PrintSpeedChangeReportOK
+       │
+       ▼
+  case toReportCode(RC_PrintSpeedChangeReportOK):  [dòng 4343]
+       └─ pc_PrinterImpColorEngine->ans_changePrintSpeed(data_para)
+            └─ (*ans_CallBackChangePrintSpeed)(True/False)  ← callback
+Điểm quan trọng
+Cơ chế	Mô tả
+ct_Command queue	FIFO queue — đảm bảo thứ tự gửi command
+Password (0x7d)	Phải gửi trước command để Engine xác thực quyền thay đổi tốc độ
+ACK/NAK system	Nếu Engine dùng ACK/NAK → command giữ trong queue cho đến khi nhận ACK; nếu NAK → xử lý ở case toReportCode(CC_PrintSpeedChangeRequestOrg)
+procENGSend()	Gọi định kỳ theo communication cycle — không phải gọi trực tiếp
+
+Logic của setPrintSpeedChangeRequest
+
+void CC_ENG::setPrintSpeedChangeRequest( short ss_PrintSpeedKind )
+{
+    TX.setBlPasswordOfChangeSpeedReq( True );
+    ct_Command << ss_PrintSpeedKind;
+}
+Hai bước thực hiện:
+1. TX.setBlPasswordOfChangeSpeedReq( True )
+
+Set flag password cho yêu cầu thay đổi tốc độ = True
+Đây là cơ chế "xác thực/khóa" để báo hiệu rằng một yêu cầu thay đổi tốc độ hợp lệ đang được gửi
+Ngăn Engine xử lý lệnh thay đổi tốc độ từ nguồn không hợp lệ
+2. ct_Command << ss_PrintSpeedKind
+
+Dùng operator << để enqueue lệnh vào command queue ct_Command
+Khi ss_PrintSpeedKind = CC_PrintSpeedChangeRequest2, giá trị enum này được đưa vào queue như một command ID
+Engine sẽ dequeue và dispatch lệnh này trong main loop để xử lý thay đổi tốc độ in
+Cơ chế Command Queue (ct_Command << value)
+Pattern này là Command Pattern dạng queue:
+
+ct_Command là một object hàng đợi lệnh (command queue) của Engine
+Operator << overload để push command vào queue
+Engine main loop sẽ poll queue và thực thi từng lệnh theo thứ tự
+CC_PrintSpeedChangeRequest2 là một giá trị enum định danh loại lệnh "Print Speed Change Request loại 2"
+Tóm tắt luồng
+
+Caller
+  └─> setPrintSpeedChangeRequest(CC_PrintSpeedChangeRequest2)
+        ├─> Set flag password = True  (xác nhận request hợp lệ)
+        └─> Push CC_PrintSpeedChangeRequest2 vào ct_Command queue
+              └─> Engine main loop dequeue & xử lý thay đổi tốc độ in
+
+
+Vị trí logic Engine dequeue & xử lý thay đổi tốc độ in
+Luồng xử lý trải qua 3 tầng, từ caller đến Engine hardware:
+
+Tầng 1: Enqueue command (đã biết)
+ccengine.cpp:7779 — CC_ENG::setPrintSpeedChangeRequest()
+
+
+TX.setBlPasswordOfChangeSpeedReq( True );
+ct_Command << ss_PrintSpeedKind;  // push CC_PrintSpeedChangeRequest2 vào queue
+Tầng 2: Caller gọi req_changePrintSpeed → enqueue
+ENGC_PrinterImpColorEngine.cpp:742 — ENGC_PrinterImpColorEngine::req_changePrintSpeed()
+
+Đây là entry point thực sự. Khi nhận TYPE_FEKType03 → map sang CC_PrintSpeedChangeRequest2:
+
+
+case TYPE_FEKType03:  // Tốc độ loại 2
+    ss_PrintSpeedType = CC_PrintSpeedChangeRequest2;
+    uc_changeMachineType = THRE_MACHINENO_2;
+    break;
+// ...
+comENG.setPrintSpeedChangeRequest( ss_PrintSpeedType );  // → enqueue
+Tầng 3: Dequeue & xử lý response từ Engine hardware
+ENGC_EngIfImpColor.cpp:4343 — trong main receive loop:
+
+
+case toReportCode( RC_PrintSpeedChangeReportOK ):   // Engine báo đổi tốc độ OK
+    pc_PrinterImpColorEngine->ans_changePrintSpeed( data_para );
+    break;
+ENGC_PrinterImpColorEngine.cpp:353 — ans_changePrintSpeed() xử lý kết quả:
+
+
+void ENGC_PrinterImpColorEngine::ans_changePrintSpeed( ushort us_Result )
+{
+    if( us_Result == 0 )  // OK
+    {
+        APIC_SystemSetting::newInstance()->setInitStab( TYPE_InitStabNonExec );
+        THRF_setMachineSpeedType( uc_changeMachineType );  // ghi vào EEPROM qua BSP
+        uc_changeMachineType = THRE_MACHINENO_0;
+    }
+    (*ans_CallBackChangePrintSpeed)( us_Result );   // gọi callback về caller
+    ans_CallBackChangePrintSpeed = NULL;
+}
+Trường hợp NAK (Engine từ chối lệnh)
+ENGC_EngIfImpColor.cpp:4709:
+
+
+case toReportCode( CC_PrintSpeedChangeRequestOrg ):  // NAK received
+    command = DEF_PRTD_NUM_UL_0xFFFFFFFF;  // clear command queue head
+    uc_CommandPara = 0x00;
+    break;
+Tóm tắt luồng hoàn chỉnh
+
+req_changePrintSpeed(TYPE_FEKType03)          [ENGC_PrinterImpColorEngine.cpp:742]
+  └─> comENG.setPrintSpeedChangeRequest(CC_PrintSpeedChangeRequest2)
+        └─> ct_Command << CC_PrintSpeedChangeRequest2  [ccengine.cpp:7782]
+              └─> (gửi command serial đến Engine hardware)
+                    └─> Engine trả về RC_PrintSpeedChangeReportOK
+                          └─> ans_changePrintSpeed()   [ENGC_PrinterImpColorEngine.cpp:353]
+                                ├─> THRF_setMachineSpeedType(THRE_MACHINENO_2)  (ghi EEPROM)
+                                └─> callback về caller
+
+Đúng. Code này chỉ chứa phần software/firmware phía controller (KM application layer). Tầng Engine hardware — tức là firmware chạy trên board Engine riêng — không có trong codebase này.
+
+Ranh giới thể hiện rõ ở hai điểm:
+
+ct_Command << CC_PrintSpeedChangeRequest2 — đây là điểm cuối của KM side: serialize command rồi gửi qua giao tiếp serial (UART/SPI) đến Engine board.
+
+case toReportCode(RC_PrintSpeedChangeReportOK) — đây là điểm nhận response ngược lại từ Engine board về KM side.
+
+Phần firmware chạy bên trong Engine board (xử lý lệnh thay đổi tốc độ thực sự: điều chỉnh motor, fuser, transfer belt...) là một binary riêng biệt, không nằm trong source tree này.
