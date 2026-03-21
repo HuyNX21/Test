@@ -1,0 +1,267 @@
+void callback_changePrintSpeed( ushort us_Result )
+
+void NVDC_EnablerSetting::ChgPrtSpd( ushort us_Result )
+
+Mục đích của setEnablerEndFlg_msgloop / getEnablerEndFlg_msgloop
+Hai hàm này quản lý một flag điều phối (EnablerEndFlg_msgloop) để tránh callback fp_Callback bị gọi hai lần trong trường hợp xử lý speed-change license (FEK02/FEK03/FEK04).
+
+Flow cụ thể trong TYPE_EnablerRequestKind_LicenseCode
+Bước 1 — Reset flag (line 578, đầu mỗi message):
+
+
+setEnablerEndFlg_msgloop( TYPE_EnablerEndFlg_NonEnd );  // = "chưa xử lý"
+Bước 2 — Sau khi actionInspectLicenseCode() chạy xong (line 623–629):
+
+
+if( FEK02 || FEK03 || FEK04 ) {
+    if( getEnablerEndFlg_msgloop() != End ) {   // flag còn NonEnd?
+        setEnablerEndFlg_msgloop( End );         // đánh dấu "đã giao"
+        break;  // KHÔNG gọi fp_Callback ở đây
+                // → callback sẽ được gọi bên trong changePrintSpeed() callback
+    }
+    // Nếu flag đã là End → fall-through → gọi fp_Callback trực tiếp
+}
+Ý nghĩa
+Flag	Trạng thái	Hành động của messageloop
+NonEnd	Callback chưa được giao	Set → End, break — nhường callback cho changePrintSpeed()
+End	Callback đã được giao/xử lý	Fall-through — gọi fp_Callback trực tiếp
+Vấn đề cần giải quyết: Với FEK02/03/04 (thay đổi tốc độ in), sau khi license được xác nhận, hệ thống phải gọi changePrintSpeed() để thực sự thay đổi tốc độ. changePrintSpeed() có callback riêng — nếu messageloop cũng gọi fp_Callback ngay lập tức thì callback sẽ bị gọi hai lần.
+
+Giải pháp: Flag này là cơ chế "one-shot handoff" — messageloop nhường quyền gọi callback cho changePrintSpeed(), và flag đảm bảo chỉ một trong hai path thực sự invoke fp_Callback.
+
+EnablerEndFlg_LCA (line 580) hoạt động tương tự nhưng cho path qua LCA Observer.
+===
+Khi nào NVDC_LcaObserver::DataChangedIndTrg được gọi, tôi muốn biết flow hàm này được call từ đâu và khi nào chương trình chạy với mode LCA
+-> Call Flow: NVDC_LcaObserver::DataChangedIndTrg
+Flow tổng quan
+
+LCA Communication Complete
+        │
+        ▼
+LCAC_LcaApi::setLcaCommResult()          [SYSC_LcaApi.cpp:59]
+        │
+        ▼
+LCAC_LcaApi::DataChangedIndTrg()         [SYSC_LcaApi.cpp:151-161]
+  (duyệt danh sách observer, gọi từng observer)
+        │
+        ▼
+NVDC_LcaObserver::DataChangedIndTrg()   [NVDC_Setting.cpp:96234]
+1. Điểm khởi đầu: setLcaCommResult()
+File: SYSC_LcaApi.cpp:59
+
+Hàm này được gọi khi LCA communication hoàn tất (nhận kết quả từ LCA server/service). Sau khi xử lý kết quả, nó gọi DataChangedIndTrg() nội bộ tại dòng 89.
+
+2. Observer dispatch: LCAC_LcaApi::DataChangedIndTrg()
+File: SYSC_LcaApi.cpp:151-161
+
+
+// Duyệt qua danh sách tất cả observer đã đăng ký
+for each pc_LcaObserver in pc_List:
+    pc_LcaObserver->DataChangedIndTrg(e_LcaTrgKind, e_LcaType, e_LcaDispCode);
+3. Đăng ký Observer
+File: NVDC_Setting.cpp:95127-95128
+
+
+static NVDC_LcaObserver c_LcaObserver;                        // tạo instance static
+APIC_Lca::newInstance()->attachObserver( &c_LcaObserver );    // đăng ký với LCA API
+4. Xử lý trong NVDC_LcaObserver::DataChangedIndTrg()
+File: NVDC_Setting.cpp:96234
+
+Hàm kiểm tra e_LcaType == TYPE_LcaType_iOption trước, rồi phân nhánh theo e_LcaTrgKind:
+
+e_LcaTrgKind	Điều kiện thêm	Xử lý
+TYPE_LcaTrgKind_Activation	AutoLicenseSettingStatus_Enable == Exec	Kích hoạt enabler setting, có thể reboot
+TYPE_LcaTrgKind_Disablement	AutoLicenseSettingStatus_Disable == Exec	Vô hiệu hoá enabler setting
+TYPE_LcaTrgKind_Enovation	AutoLicenseSettingStatus_Restore == Exec	Khôi phục (restore) setting
+TYPE_LcaTrgKind_MakeDirectory	(không có thêm)	Tạo thư mục
+5. Khi nào chạy với mode LCA?
+Hàm được gọi khi:
+
+LCA communication hoàn tất — tức là thiết bị đã liên lạc với LCA server xong
+e_LcaType == TYPE_LcaType_iOption — LCA type phải là iOption
+Auto-license status đang trong trạng thái exec tương ứng với mode (Enable/Disable/Restore)
+Nghĩa là flow này chỉ thực sự có tác dụng khi thiết bị đang thực hiện auto license setting (EnablerSetting tự động), không phải manual.
+
+Class hierarchy
+
+APIC_LcaObserver                          [APIC_LcaApi.h:228]
+    └── NVDC_LcaObserver                  [NVDC_Setting_EnablerSetting.h:550]
+            └── DataChangedIndTrg()       [NVDC_Setting.cpp:96234]
+
+APIC_LcaObserver
+    └── NVDC_LcaObserver2 (RDS)          [NVDC_Setting_RdsSetting.h:2737]
+            └── đăng ký tại              [NVDC_NetworkSetting.cpp:81460]
+==
+
+Khi thiết bị bắt đầu đăng ký license thì thiết bị sẽ gửi thông tin gì đó lên server để xác thực license có phải không? Nếu đúng thì thiết bị đang gửi thông qua hàm nào và gửi như nào? Kết quả từ server đẩy về sẽ nhận qua đâu?
+==
+LCA License Registration: Send & Receive Flow
+Tổng quan
+Đúng, thiết bị gửi thông tin lên LCA server để xác thực license. Giao thức sử dụng là WebDAV over HTTP.
+
+Flow đầy đủ
+
+User/System kích hoạt Activation
+        │
+        ▼
+APIC_Lca::indTrg(TYPE_LcaTrgKind_Activation, ...)    [SYSC_LcaApi.cpp:52]
+        │ gọi
+        ▼
+LCAC_LcaApi::indTrg_2nd(...)                          [SYSC_LcaApi.cpp:165]
+        │ notify tất cả LCA observer
+        ▼
+LCAC_LcaObserver::indTrg(TYPE_LcaTrgKind_Activation) [LCA_TskEvent.cpp:112]
+        │ map → LCAE_SEND_ACTIVATION                  [LCA_TskEvent.cpp:155]
+        │
+        ▼
+c_Lca_Webdavtask.reqTransStart()                      [LCA_TskEvent.cpp:673]
+        │
+        ▼
+LCAC_WebDAVClient::makeRequestHeader()                [LCA_WebDAVClient.cpp:63]
+LCAC_WebDAVClient::makeRequestBody()                  [LCA_WebDAVClient.cpp:576]
+        │ gửi qua HTTP/WebDAV (PUT)
+        ▼
+    [LCA SERVER]
+        │ response
+        ▼
+receiveResponceHeader() / receiveResponceBody()       [LCA_WebDAVTask.cpp]
+        │
+        ▼
+setLcaCommResult(TrgKind, Type, DispCode, ErrCode)    [LCA_TskEvent.cpp:845/848]
+        │
+        ▼
+LCAC_LcaApi::DataChangedIndTrg()                      [SYSC_LcaApi.cpp:151]
+        │ notify observers
+        ▼
+NVDC_LcaObserver::DataChangedIndTrg()                 [NVDC_Setting.cpp:96234]
+Thiết bị gửi gì lên server?
+Dữ liệu	Mô tả	File
+Request Code	Mã challenge do thiết bị tạo ra	LCA_WebDAVClient.cpp
+Certificate (PKCS12)	Device certificate với private key	LCA_Install.cpp:245
+Root Certificate	x509 root cert	LCA_Install.cpp:415
+CA Certificate Chain	Intermediate CA certs	LCA_Install.cpp:445
+Serial Number / Device ID	Nhận diện thiết bị	sc_Certification_Data[]
+Token Code / License Key	Mã license cần kích hoạt	uc_Lca_RequestCode[]
+Format gửi: Binary + XML, đẩy lên WebDAV server qua HTTP PUT, với:
+
+Request header: Session ID, Authentication (Basic), Content-Length, URL path
+Request body: Certificate binary, license data (tối đa 1MB buffer)
+Hàm gửi chính
+LCA_WebDAVClient.cpp:63 — makeRequestHeader()
+
+Build HTTP header: method (PUT/GET/PROPFIND...), URL, auth, content-length
+LCA_WebDAVClient.cpp:576 — makeRequestBody()
+
+Đẩy payload thực sự (certificate data, license data)
+Kết quả server đẩy về — nhận ở đâu?
+LCA_WebDAVTask.cpp — receiveResponceHeader() / receiveResponceBody()
+
+Parse HTTP response từ server
+Sau đó gọi setLcaCommResult() tại LCA_TskEvent.cpp với result code:
+
+Result Code	Ý nghĩa	Line
+TYPE_LcaDispCode_NormalEnd	Thành công	:845
+TYPE_LcaDispCode_FalseEnd	Lỗi giao tiếp	:917
+TYPE_LcaDispCode_TokenCodeError	License key sai	—
+TYPE_LcaDispCode_SerialNumberError	Serial không khớp	—
+TYPE_LcaDispCode_TimeOutError	Timeout	:495
+setLcaCommResult() → notify DataChangedIndTrg() → NVDC_LcaObserver xử lý kết quả (enable/disable feature).
+
+Kết quả background task vừa hoàn thành cung cấp thêm thông tin quan trọng về TYPE_LcaTrgKind_GetProCertificate — đây là trigger dùng để lấy Product Certificate qua HTTP (CSRC HTTP communication):
+
+Các điểm kích hoạt indTrg(GetProCertificate)
+Có nhiều nơi trong code gọi trigger này:
+
+File	Line	Ngữ cảnh
+OAP_TRN_deviceservice.cpp:2770	OAP device service	Từ OAP (remote management)
+OAP_TRN_devicesetting_permanent.cpp:78291	OAP permanent setting	Từ OAP setting
+pcgserv_CLCD.cpp:19957	Panel/UI	Từ màn hình điều khiển
+pcmCommonApiLib.cpp:19901	PCM common API	Từ PCM module
+NVDC_NetworkSetting.cpp:80641	Network setting	Khi network setting thay đổi
+NVDC_RoimWscDataIF.cpp:2119	ROIM/WSC data	Từ ROIM interface
+Kết quả trả về từ server
+RDS_TskEvent.cpp:11818-11822 — RDS module nhận kết quả và gọi:
+
+
+// Thành công:
+pc_Lca->setLcaCommResult( TYPE_LcaTrgKind_GetProCertificate,
+                           TYPE_LcaType_ProductCertificate,
+                           TYPE_LcaDispCode_NormalEnd, 0 );
+
+// Lỗi LMS:
+pc_Lca->setLcaCommResult( TYPE_LcaTrgKind_GetProCertificate,
+                           TYPE_LcaType_ProductCertificate,
+                           TYPE_LcaDispCode_LMSError, 0 );
+Bổ sung vào flow trước
+
+[Panel UI / OAP / PCM / Network Setting]
+        │
+        ▼
+APIC_Lca::indTrg(TYPE_LcaTrgKind_GetProCertificate,
+                  TYPE_LcaType_ProductCertificate)
+        │
+        ▼
+... (WebDAV send flow như đã mô tả) ...
+        │
+        ▼
+RDS_TskEvent.cpp  ← nhận response từ CSRC server
+        │
+        ▼
+setLcaCommResult(NormalEnd / LMSError)
+        │
+        ▼
+DataChangedIndTrg() → NVDC observer xử lý
+Vậy GetProCertificate là bước lấy Product Certificate từ CSRC server qua HTTP, được trigger từ nhiều nơi (UI panel, OAP remote, PCM, network setting), và kết quả được xử lý trong RDS_TskEvent.cpp.
+
+===
+
+Mối liên hệ giữa EnablerEndFlg_msgloop và EnablerEndFlg_LCA
+Định nghĩa (NVDC_Setting_EnablerSetting.h:448-449)
+
+TYPE_EnablerEndFlg  e_EnablerEndFlg_msgloop;  // flag "đã xử lý xong" của messageloop + callback đổi tốc độ in
+TYPE_EnablerEndFlg  e_EnablerEndFlg_LCA;      // flag "đã xử lý xong" của LCA Observer + callback đổi tốc độ in
+Giá trị: TYPE_EnablerEndFlg_NonEnd = 0 (chưa xong), TYPE_EnablerEndFlg_End = 1 (đã xong).
+
+Mục đích: Cơ chế đồng bộ "ai xong trước thì chờ ai"
+Khi xử lý license code loại LicenseCode (hoặc InvalidCode, InspectRestorCode) với tính năng đổi tốc độ in (FEK02/03/04), hệ thống cần chờ cả 2 luồng hoàn tất trước khi reboot:
+
+Luồng 1 – SYSC_Enabler::messageloop → case TYPE_EnablerRequestKind_LicenseCode → gọi ChgPrtSpd
+Luồng 2 – NVDC_LcaObserver::DataChangedIndTrg (LCA Observer callback)
+Logic trong NVDC_EnablerSetting::ChgPrtSpd (line 95474–95497)
+
+Khi ChgPrtSpd được gọi:
+
+if (EnablerEndFlg_msgloop != End) {
+    // messageloop chưa đánh dấu xong → ta đánh dấu nó xong ngay
+    setEnablerEndFlg_msgloop(End)
+
+    if (EnablerEndFlg_LCA == End) {
+        // LCA đã xong trước rồi → cả 2 đều xong → REBOOT
+        if (result == OK) { setCheckUSBFlag(); reboot(); }
+    } else {
+        // LCA chưa xong → đánh dấu LCA = End (thay cho nó) → không reboot
+        setEnablerEndFlg_LCA(End)
+        return; // kết thúc, chờ LCA đến sau
+    }
+}
+// Nếu msgloop đã là End rồi → tiếp tục xuống switch-case để gọi callback
+Tóm tắt:
+
+msgloop đến trước LCA → set msgloop=End, set LCA=End (phòng thủ), không reboot, chờ LCA
+msgloop đến sau LCA (LCA đã End) → set msgloop=End, cả 2 đã End → REBOOT
+Logic trong NVDC_LcaObserver::DataChangedIndTrg (line 96264–96275)
+
+Trong case LCA nhận kết quả (e.g. NormalEnd, FEK loại đổi tốc độ):
+
+if (EnablerEndFlg_LCA == End) {
+    // msgloop đã xong trước → ta xong sau → cả 2 đều xong → REBOOT
+    setCheckUSBFlag(); reboot();
+} else {
+    // msgloop chưa xong → ta đánh dấu LCA = End → không reboot, chờ msgloop
+    setEnablerEndFlg_LCA(End)
+}
+Tóm tắt quan hệ
+Scenario	msgloop đến	LCA đến	Ai reboot?
+msgloop trước LCA	set msgloop=End, set LCA=End → return	Thấy LCA==End → reboot	LCA
+LCA trước msgloop	set LCA=End → return	Thấy LCA==End (đã set) + msgloop==End → reboot	ChgPrtSpd
+Nguyên tắc: Hai flag hoạt động như một rendezvous barrier — cờ nào đến trước thì set cờ của mình, đến sau thì kiểm tra cờ kia; nếu cờ kia đã End thì đủ điều kiện reboot, nếu chưa thì đánh dấu cờ còn lại End và trả về, để bên còn lại xử lý reboot khi đến.
