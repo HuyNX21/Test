@@ -42,3 +42,56 @@ Trước khi gửi, sendSynchronizedRequest đăng ký (sequence_id → buffer +
 Receive thread khi nhận response, match sequence_id để tìm đúng caller, copy data, rồi signal CV.
 Caller thread wake up → biết chắc buffer đã đầy đủ data → an toàn để unmarshalParams.
 Đây là pattern synchronous RPC over async socket: socket bản chất bất đồng bộ và dùng chung cho nhiều request đồng thời, nên cần sequence_id để demux response về đúng caller, và CV để biến nó thành blocking call từ góc nhìn caller.
+=======================================================
+Step "MEMCPY response vào sendbuf" — chi tiết
+Mọi thứ xảy ra trong DIVC_SynchronizedMediator. Có 2 thời điểm quan trọng:
+
+A. Trước khi gửi — đăng ký buffer
+Tại DIVC_SynchronizedMediator.cpp:235, trong sendSynchronizedRequest:
+
+
+// �����f�[�^�����邽�߁A�A�h���X���o���Ă���
+mSendBuffer = buffer;     // ← LƯU địa chỉ sendbuf của caller vào member
+buffer ở đây chính là sendbuf mà caller (Proxy) đã truyền xuống từ Send_ProxyMgr(sendbuf, size). Mediator lưu lại con trỏ này như "địa chỉ ghi response".
+
+Sau đó caller block tại dòng 312: mThreadConditionWait->wait();
+
+B. Khi response về — copy vào đúng buffer đó
+Receive thread cuối cùng gọi RecvReply() (DIVC_SynchronizedMediator.cpp:362). Tại dòng 380:
+
+
+// ��ʂ���n���ꂽ�v���f�[�^�o�b�t�@�ɉ����f�[�^���R�s�[
+memcpy( mSendBuffer, buffer, length );
+//      ↑           ↑
+//   địa chỉ     buffer tạm chứa response
+//   sendbuf     vừa đọc từ socket
+//   của caller
+Đây chính là step "MEMCPY response vào sendbuf" tôi nói lúc trước. Cụ thể:
+
+mSendBuffer = con trỏ tới sendbuf của caller (đã lưu ở bước A).
+buffer (param thứ 2) = vùng nhớ tạm mà receive thread vừa read() từ socket vào.
+length = size của response.
+Sau memcpy xong, receive thread gọi mThreadConditionWait->wakeup() (dòng 396) → caller thread unblock → Send_ProxyMgr return → quay về DIVC_ProxyMethodTemplate.h:1612 chạy unmarshalParams đọc dữ liệu mới từ sendbuf.
+
+Lưu ý nhỏ về macro
+Đoạn này có ifdef:
+
+#ifndef DEF_DISABLE_DIVLIB_DEL_RAM_THREAD: không memcpy ở đây — comment ghi "buffer đã được copy sẵn ở tầng trên" (variant tối ưu RAM, copy ở chỗ khác).
+#else: có memcpy như trên — đây là code path mặc định bạn nên hình dung.
+Cả 2 nhánh đều dẫn tới cùng một kết quả: sendbuf của caller chứa response trước khi wakeup().
+
+Tổng kết chuỗi mắt xích
+
+Proxy caller:  Send_ProxyMgr(sendbuf)
+   └─ sendRequestMessage
+      └─ ProxyRequestManager::sendSynchronizedRequest
+         └─ SynchronizedMediator::sendSynchronizedRequest(buffer=sendbuf)
+            ├─ mSendBuffer = buffer;          ← (A) lưu địa chỉ
+            ├─ sendRequestData (gửi qua socket)
+            └─ mThreadConditionWait->wait();  ← block
+
+Receive thread: messageReceive → ... → 
+   SynchronizedMediator::RecvReply(seqId, tmpBuf, len)
+      ├─ memcpy(mSendBuffer, tmpBuf, len);    ← (B) GHI vào sendbuf
+      └─ mThreadConditionWait->wakeup();      ← đánh thức caller
+Vậy cụ thể: memcpy nằm tại DIVC_SynchronizedMediator.cpp:380, copy từ buffer tạm (đọc từ socket) sang đúng sendbuf mà Proxy đã đăng ký.
